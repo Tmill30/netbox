@@ -10,10 +10,23 @@ from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
 from rest_framework import status
 
+from utilities.permissions import get_permission_for_model
+
 __all__ = (
+    'get_viewable_objects',
     'handle_protectederror',
     'handle_rest_api_exception',
 )
+
+
+def get_viewable_objects(user, objects):
+    """
+    Return the subset of objects which the user has permission to view.
+    """
+    return [
+        obj for obj in objects
+        if user.has_perm(get_permission_for_model(obj, 'view'), obj)
+    ]
 
 
 def handle_protectederror(obj_list, request, e):
@@ -33,14 +46,18 @@ def handle_protectederror(obj_list, request, e):
         count=len(protected_objects) if len(protected_objects) <= 50 else _('More than 50'),
     )
 
-    # Append dependent objects to error message
-    dependent_objects = []
-    for dependent in protected_objects[:50]:
+    # Append dependent objects to error message, omitting any the user is not permitted to view
+    dependent_objects = protected_objects[:50]
+    viewable_objects = get_viewable_objects(request.user, dependent_objects)
+    dependent_links = []
+    for dependent in viewable_objects:
         if hasattr(dependent, 'get_absolute_url'):
-            dependent_objects.append(f'<a href="{dependent.get_absolute_url()}">{escape(dependent)}</a>')
+            dependent_links.append(f'<a href="{dependent.get_absolute_url()}">{escape(dependent)}</a>')
         else:
-            dependent_objects.append(escape(str(dependent)))
-    err_message += ', '.join(dependent_objects)
+            dependent_links.append(escape(str(dependent)))
+    if hidden_count := len(dependent_objects) - len(viewable_objects):
+        dependent_links.append(_('{count} you do not have permission to view').format(count=hidden_count))
+    err_message += ', '.join(dependent_links)
 
     messages.error(request, mark_safe(err_message))
 
