@@ -577,6 +577,37 @@ class BulkOperationRoutingTestCase(TransactionTestCase):
         flush_events.assert_not_called()
 
 
+class ProtectedDeleteTestCase(APITestCase):
+    """
+    When a delete is blocked by dependent objects, the 409 response must identify only those dependents the user is
+    permitted to view. (Ref: #23398)
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.device = create_test_device('Device 1')
+        self.url = reverse('dcim-api:devicetype-detail', kwargs={'pk': self.device.device_type.pk})
+        self.add_permissions('dcim.view_devicetype', 'dcim.delete_devicetype')
+
+    @tag('regression')
+    def test_delete_omits_dependent_objects_without_view_permission(self):
+        response = self.client.delete(self.url, **self.header)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertNotIn(str(self.device), response.data['detail'])
+        self.assertIn('1 you do not have permission to view', response.data['detail'])
+
+    @tag('regression')
+    def test_delete_lists_viewable_dependent_objects(self):
+        self.add_permissions('dcim.view_device')
+
+        response = self.client.delete(self.url, **self.header)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn(f'{self.device} ({self.device.pk})', response.data['detail'])
+        self.assertNotIn('permission to view', response.data['detail'])
+
+
 class ObjectUpdateLockingTestCase(APITestCase):
     """
     An update must lock the rows of the objects being updated before retrieving them, and hold the locks until the

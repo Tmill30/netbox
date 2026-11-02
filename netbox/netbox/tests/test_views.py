@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 from django.contrib.contenttypes.models import ContentType
+from django.contrib.messages import get_messages
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models.signals import pre_delete
 from django.http import HttpResponse
@@ -600,3 +601,57 @@ class DeleteAtomicityTestCase(DeleteAtomicityMixin, TransactionTestCase):
         # Without the view's atomic block, the member device's cleared vc_priority commits here,
         # leaving a change which dispatches no events
         self.assertDeleteRolledBack(virtual_chassis, device)
+
+
+class ObjectDeleteViewProtectedErrorTestCase(TestCase):
+    """
+    When a delete is blocked by dependent objects, the error message must identify only those dependents the user
+    is permitted to view. (Ref: #23398)
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        manufacturer = Manufacturer.objects.create(name='Manufacturer 1', slug='manufacturer-1')
+        cls.device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model='Device Type 1', slug='device-type-1'
+        )
+        site = Site.objects.create(name='Site 1', slug='site-1')
+        role = DeviceRole.objects.create(name='Device Role 1', slug='device-role-1')
+        cls.device = Device.objects.create(name='Device 1', site=site, role=role, device_type=cls.device_type)
+
+    def setUp(self):
+        super().setUp()
+        self.add_permissions('dcim.view_devicetype', 'dcim.delete_devicetype')
+        self.url = get_action_url(DeviceType, action='delete', kwargs={'pk': self.device_type.pk})
+
+    def get_error_message(self, response):
+        messages = list(get_messages(response.wsgi_request))
+        self.assertEqual(len(messages), 1)
+        return str(messages[0])
+
+    @tag('regression')
+    def test_get_omits_dependent_objects_without_view_permission(self):
+        message = self.get_error_message(self.client.get(self.url))
+
+        self.assertIn(f'<strong>{self.device_type}</strong>', message)
+        self.assertNotIn(self.device.get_absolute_url(), message)
+        self.assertIn('1 you do not have permission to view', message)
+
+    @tag('regression')
+    def test_post_omits_dependent_objects_without_view_permission(self):
+        message = self.get_error_message(self.client.post(self.url, data={'confirm': True}))
+
+        self.assertIn(f'<strong>{self.device_type}</strong>', message)
+        self.assertNotIn(self.device.get_absolute_url(), message)
+        self.assertIn('1 you do not have permission to view', message)
+        self.assertTrue(DeviceType.objects.filter(pk=self.device_type.pk).exists())
+
+    @tag('regression')
+    def test_get_lists_viewable_dependent_objects_once(self):
+        self.add_permissions('dcim.view_device')
+
+        message = self.get_error_message(self.client.get(self.url))
+
+        self.assertIn(f'<strong>{self.device_type}</strong>', message)
+        self.assertEqual(message.count(str(self.device)), 1)
+        self.assertNotIn('permission to view', message)
